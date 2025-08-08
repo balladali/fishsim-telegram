@@ -24,5 +24,10 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 COPY --from=build /app/build/install/fishsim-telegram /app
 ENV TG_BOT_TOKEN=""
+ENV DATA_DIR="/data"
+
+# Каталог с данными как volume, чтобы переживал перезапуски контейнера
+VOLUME ["/data"]
+
 USER 1001
 ENTRYPOINT ["./bin/fishsim-telegram"]
