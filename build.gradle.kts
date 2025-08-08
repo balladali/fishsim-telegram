@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "1.9.21"
+    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.21"
     application
 }
 
@@ -9,9 +10,8 @@ repositories {
 }
 
 dependencies {
-    implementation("io.github.kotlin-telegram-bot.kotlin-telegram-bot:telegram:6.1.0")
-    implementation("ch.qos.logback:logback-classic:1.4.14")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("io.github.kotlin-telegram-bot.kotlin-telegram-bot:telegram:6.3.0")
 }
 
 application {

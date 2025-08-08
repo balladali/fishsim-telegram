@@ -1,3 +1,4 @@
+
 package model
 
 import kotlinx.serialization.Serializable
@@ -12,8 +13,14 @@ import kotlin.random.Random
     var nick:String,
     var coins:Int = 100,
     var rod:Rod = Rod.BASIC,
-    val bag:MutableList<Fish> = mutableListOf()
+    val bag:MutableList<Fish> = mutableListOf(),
+
+    // Накопительная статистика (не сбрасывается при продаже)
+    var lifetimeWeight: Double = 0.0,
+    var lifetimeEarnings: Int = 0,
+    var fishCaught: Int = 0
 ){
+    // Текущий вес рыбы в садке (может быть 0 после продажи)
     val totalWeight get() = bag.sumOf { it.weight }
 }
 

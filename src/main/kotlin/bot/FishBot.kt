@@ -12,11 +12,26 @@ import com.github.kotlintelegrambot.logging.LogLevel
 import model.GameData
 import model.Player
 import model.Rod
+import storage.Storage
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
-class FishBot(token:String){
-    private val players = ConcurrentHashMap<Long,Player>()
+class FishBot(token:String, dataDir:String = "./data"){
+    private val storage = Storage(dataDir)
+    private val players: ConcurrentHashMap<Long, Player> = storage.load()
+
+    // debounce save
+    private val saver = Executors.newSingleThreadScheduledExecutor()
+    @Volatile private var saveScheduled = false
+    private fun persist() {
+        if (saveScheduled) return
+        saveScheduled = true
+        saver.schedule({
+            try { storage.save(players) } finally { saveScheduled = false }
+        }, 500, TimeUnit.MILLISECONDS)
+    }
 
     private val bot: Bot = bot {
         this.token = token
@@ -28,7 +43,8 @@ class FishBot(token:String){
                 val user = msg.from ?: return@command
                 val chatId = msg.chat.id
                 val pl = players.computeIfAbsent(user.id){ Player(user.id, user.firstName ?: "Anon") }
-                sendMessage(chatId, "🎣 Добро пожаловать в FishSim, ${pl.nick}!", mainMenu())
+                persist()
+                sendMessage(chatId, withBoard("🎣 Добро пожаловать в FishSim, ${pl.nick}!"), mainMenu())
             }
 
             callbackQuery {
@@ -36,19 +52,18 @@ class FishBot(token:String){
                 val data = cq.data ?: return@callbackQuery
                 val from = cq.from
                 val chatId = cq.message?.chat?.id ?: return@callbackQuery
-                val mid = cq.message?.messageId ?: return@callbackQuery
+                val mid: Long = cq.message?.messageId ?: return@callbackQuery
 
                 val pl = players.computeIfAbsent(from.id){ Player(from.id, from.firstName ?: "Anon") }
 
                 when {
-                    data == "menu" -> editMessage(chatId, mid, "Главное меню:", mainMenu())
+                    data == "menu" -> editMessage(chatId, mid, withBoard("Главное меню:"), mainMenu())
                     data.startsWith("shop") -> handleShop(chatId, mid, pl, data)
                     data.startsWith("loc")  -> chooseLocation(chatId, mid, pl, data)
                     data == "invent"        -> showInvent(chatId, mid, pl)
                     data == "sell"          -> sellAll(chatId, mid, pl)
-                    data == "score"         -> score(chatId, mid)
+                    data == "score"         -> editMessage(chatId, mid, withBoard("🏆 Таблица лидеров"), ikm(row(btn("⬅️ Назад","menu"))))
                 }
-                // Stop the loading spinner on the button
                 bot.answerCallbackQuery(cq.id)
             }
         }
@@ -81,61 +96,80 @@ class FishBot(token:String){
             row(btn("⬅️ Назад","menu"))
         )
 
+    /* ---------- leaderboard helpers ---------- */
+
+    private fun renderLeaderboard(limit: Int = 10): String {
+        val table = players.values
+            .sortedByDescending { it.lifetimeWeight } // рейтинг по накопленному весу
+            .take(limit)
+            .mapIndexed { i, p ->
+                "${i + 1}. ${p.nick} — %.2f кг (доход: %d₽, уловов: %d)"
+                    .format(p.lifetimeWeight, p.lifetimeEarnings, p.fishCaught)
+            }
+            .joinToString("\n")
+
+        val body = table.ifBlank { "Пока никто ничего не поймал." }
+        return "🏆 Таблица лидеров\n$body"
+    }
+
+    private fun withBoard(text: String): String {
+        val base = if (text.length > 3800) text.take(3800) + "…" else text
+        return "$base\n${renderLeaderboard()}"
+    }
+
     /* ---------- Handlers ---------- */
 
-    private fun handleShop(chatId: Long, mid:Long, pl:Player, data:String){
+    private fun handleShop(chatId: Long, mid: Long, pl:Player, data:String){
         if (data=="shop") {
-            editMessage(chatId, mid, "Баланс: ${pl.coins}₽\nВыберите товар:", shopMenu(pl))
+            editMessage(chatId, mid, withBoard("Баланс: ${pl.coins}₽\nВыберите товар:"), shopMenu(pl))
             return
         }
         if (data=="shop_buy_pro") {
             if (pl.coins < Rod.PRO.price) {
-                answerAlert("Недостаточно средств")
+                editMessage(chatId, mid, withBoard("Недостаточно средств. Баланс: ${pl.coins}₽"), shopMenu(pl))
                 return
             }
             pl.coins -= Rod.PRO.price
             pl.rod = Rod.PRO
-            editMessage(chatId, mid, "Поздравляем, вы купили PRO-удилище!\nБаланс: ${pl.coins}₽", mainMenu())
+            persist()
+            editMessage(chatId, mid, withBoard("Поздравляем, вы купили PRO-удилище!\nБаланс: ${pl.coins}₽"), mainMenu())
         }
     }
 
-    private fun chooseLocation(chatId:Long, mid:Long, pl:Player, data:String){
+    private fun chooseLocation(chatId:Long, mid: Long, pl:Player, data:String){
         if (data=="loc") {
-            editMessage(chatId, mid, "Где будем рыбачить?", locMenu())
+            editMessage(chatId, mid, withBoard("Где будем рыбачить?"), locMenu())
             return
         }
         val locId = data.removePrefix("loc_")
-        editMessage(chatId, mid, "Заброс удочки... ⏳", null)
+        editMessage(chatId, mid, withBoard("Заброс удочки... ⏳"), null)
         thread {
             Thread.sleep(2_000)
             val fish = GameData.rollFish(locId)
             pl.bag += fish
-            sendMessage(chatId, "🐟 Улов: %.2f кг %s (≈%d₽)".format(fish.weight, fish.species, fish.price), mainMenu())
+            pl.lifetimeWeight += fish.weight
+            pl.fishCaught += 1
+            persist()
+            sendMessage(chatId, withBoard("🐟 Улов: %.2f кг %s (≈%d₽)".format(fish.weight, fish.species, fish.price)), mainMenu())
         }
     }
 
-    private fun showInvent(chatId:Long, mid:Long, pl:Player){
+    private fun showInvent(chatId:Long, mid: Long, pl:Player){
         val txt = if(pl.bag.isEmpty()) "Садок пуст."
                   else pl.bag.joinToString("\n"){ "%.2f кг %s".format(it.weight,it.species) }
-        editMessage(chatId, mid, txt, ikm(row(btn("⬅️ Назад","menu"))))
+        editMessage(chatId, mid, withBoard(txt), ikm(row(btn("⬅️ Назад","menu"))))
     }
 
-    private fun sellAll(chatId:Long, mid:Long, pl:Player){
+    private fun sellAll(chatId:Long, mid: Long, pl:Player){
         val sum = pl.bag.sumOf { it.price }
         pl.coins += sum
+        pl.lifetimeEarnings += sum
         pl.bag.clear()
-        editMessage(chatId, mid, "Продали рыбу на $sum₽. Баланс: ${pl.coins}₽", mainMenu())
+        persist()
+        editMessage(chatId, mid, withBoard("Продали рыбу на $sum₽. Баланс: ${pl.coins}₽"), mainMenu())
     }
 
-    private fun score(chatId:Long, mid:Long){
-        val table = players.values.sortedByDescending { it.totalWeight }
-            .withIndex()
-            .joinToString("\n"){ (i,p)-> "${i+1}. ${p.nick} — %.2f кг".format(p.totalWeight) }
-            .ifBlank { "Пока никто ничего не поймал." }
-        editMessage(chatId, mid, "🏆 Таблица лидеров\n\n$table", ikm(row(btn("⬅️ Назад","menu"))))
-    }
-
-    /* ---------- helpers ---------- */
+    /* ---------- low-level helpers ---------- */
 
     private fun sendMessage(chatId: Long, text: String, markup: InlineKeyboardMarkup? = null) {
         bot.sendMessage(chatId = ChatId.fromId(chatId), text = text, replyMarkup = markup)
@@ -143,11 +177,6 @@ class FishBot(token:String){
 
     private fun editMessage(chatId: Long, messageId: Long, text: String, markup: InlineKeyboardMarkup? = null) {
         bot.editMessageText(chatId = ChatId.fromId(chatId), messageId = messageId, text = text, replyMarkup = markup)
-    }
-
-    private fun answerAlert(text:String){
-        // Utility placeholder if you want to show alerts via answerCallbackQuery with showAlert=true.
-        // Implemented in-place in handlers when needed.
     }
 
     private fun ikm(vararg rows: List<InlineKeyboardButton>) =
